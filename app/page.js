@@ -203,6 +203,15 @@ export default function Home() {
 
           <div className="card">
             <p className="label">Aktuelle Nachrichten (nur Titel)</p>
+            {result.newsUnavailable && (
+              <p style={{ fontSize: "13px", color: "#8a8a86", margin: "0 0 8px" }}>
+                News-Daten sind im aktuellen FMP-Plan nicht verfuegbar. Die Einordnung basiert auf
+                Kursverlauf und Fundamentaldaten.
+              </p>
+            )}
+            {!result.newsUnavailable && result.news.length === 0 && (
+              <p style={{ fontSize: "13px", color: "#8a8a86", margin: 0 }}>Keine aktuellen News gefunden.</p>
+            )}
             {result.news.map((n, i) => (
               <div className="news-item" key={i}>
                 <a href={n.url} target="_blank" rel="noopener noreferrer">
