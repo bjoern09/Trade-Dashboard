@@ -18,15 +18,25 @@ export async function POST(request) {
 
     const cleanTicker = ticker.trim().toUpperCase();
 
-    const [profile, prices, keyMetrics, ratios, news] = await Promise.all([
+    const [profile, prices, keyMetrics, ratios] = await Promise.all([
       getCompanyProfile(cleanTicker),
       getHistoricalPrices(cleanTicker),
       getKeyMetrics(cleanTicker),
-      getFinancialRatios(cleanTicker),
-      getStockNews(cleanTicker)
+      getFinancialRatios(cleanTicker)
     ]);
 
+    // News sind im FMP Free-Plan teils gesperrt (402 Restricted Endpoint) - darf die Analyse nicht blockieren
+    let news = [];
+    let newsUnavailable = false;
+    try {
+      news = await getStockNews(cleanTicker);
+    } catch (newsErr) {
+      console.warn("News-Abruf fehlgeschlagen, fahre ohne News fort:", newsErr.message);
+      newsUnavailable = true;
+    }
+
     const swings = detectSwingPoints(prices, 0.05);
+    // nur die letzten 12 Schwungpunkte an Claude schicken, sonst wird der Prompt zu lang
     const recentSwings = swings.slice(-12);
 
     const analysis = await runAnalysis({
@@ -44,6 +54,7 @@ export async function POST(request) {
       priceHistory: prices,
       swings: recentSwings,
       news,
+      newsUnavailable,
       analysis
     });
   } catch (err) {
