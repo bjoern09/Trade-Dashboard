@@ -1,7 +1,17 @@
-"use client";
+ "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Chart from "chart.js/auto";
+
+const QUICK_PICKS = ["QDVE", "XYZ", "XPEV", "BABA", "PYPL", "OCGN"];
+
+const LOADING_STEPS = [
+  "Kursverlauf wird geladen...",
+  "Fundamentaldaten werden abgerufen...",
+  "Schwungpunkte werden erkannt...",
+  "Claude ordnet die Wellenstruktur ein...",
+  "Fast fertig..."
+];
 
 function RatingBadge({ rating }) {
   return <span className={`badge ${rating}`}>{rating}</span>;
@@ -13,25 +23,63 @@ function scoreColor(score) {
   return "#b8860b";
 }
 
+function tendency(score) {
+  if (score >= 6) return { label: "Tendenz: deutlich positiv", color: "#1e7a34", bg: "#e6f4ea" };
+  if (score >= 2) return { label: "Tendenz: eher positiv", color: "#1e7a34", bg: "#e6f4ea" };
+  if (score <= -6) return { label: "Tendenz: deutlich vorsichtig", color: "#a33333", bg: "#fbeaea" };
+  if (score <= -2) return { label: "Tendenz: eher vorsichtig", color: "#a33333", bg: "#fbeaea" };
+  return { label: "Tendenz: neutral / gemischtes Bild", color: "#8a6d1f", bg: "#faf3e3" };
+}
+
 export default function Home() {
   const [ticker, setTicker] = useState("");
+  const [query, setQuery] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingStep, setLoadingStep] = useState(0);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
+  const debounceRef = useRef(null);
+  const stepIntervalRef = useRef(null);
 
-  async function handleAnalyze() {
-    if (!ticker.trim()) return;
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (query.trim().length < 2) {
+      setSuggestions([]);
+      return;
+    }
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        setSuggestions(data.results || []);
+      } catch {
+        setSuggestions([]);
+      }
+    }, 350);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]);
+
+  const runAnalysis = useCallback(async (symbol) => {
+    if (!symbol) return;
     setLoading(true);
+    setLoadingStep(0);
     setError(null);
     setResult(null);
+    setShowSuggestions(false);
+
+    stepIntervalRef.current = setInterval(() => {
+      setLoadingStep((s) => Math.min(s + 1, LOADING_STEPS.length - 1));
+    }, 1800);
 
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticker })
+        body: JSON.stringify({ ticker: symbol })
       });
       const data = await res.json();
       if (!res.ok) {
@@ -41,92 +89,137 @@ export default function Home() {
     } catch (e) {
       setError(e.message);
     } finally {
+      clearInterval(stepIntervalRef.current);
       setLoading(false);
     }
+  }, []);
+
+  function handleSelectSuggestion(s) {
+    setTicker(s.symbol);
+    setQuery(`${s.symbol} \u2014 ${s.name}`);
+    runAnalysis(s.symbol);
+  }
+
+  function handleQuickPick(symbol) {
+    setTicker(symbol);
+    setQuery(symbol);
+    runAnalysis(symbol);
+  }
+
+  function handleManualSubmit() {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    const looksLikeTicker = /^[A-Za-z0-9.\-]{1,6}$/.test(trimmed);
+    runAnalysis(looksLikeTicker ? trimmed.toUpperCase() : ticker || trimmed);
   }
 
   useEffect(() => {
     if (!result || !chartRef.current) return;
-
-    if (chartInstance.current) {
-      chartInstance.current.destroy();
-    }
+    if (chartInstance.current) chartInstance.current.destroy();
 
     const labels = result.priceHistory.map((p) => p.date);
     const closes = result.priceHistory.map((p) => p.close);
-
     const swingDates = new Set(result.swings.map((s) => s.date));
-    const swingPoints = result.priceHistory.map((p) =>
-      swingDates.has(p.date) ? p.close : null
-    );
+    const swingPoints = result.priceHistory.map((p) => (swingDates.has(p.date) ? p.close : null));
 
     chartInstance.current = new Chart(chartRef.current, {
       type: "line",
       data: {
         labels,
         datasets: [
-          {
-            label: "Schlusskurs",
-            data: closes,
-            borderColor: "#1a1a1a",
-            borderWidth: 1.5,
-            pointRadius: 0,
-            tension: 0.1
-          },
-          {
-            label: "Schwungpunkte",
-            data: swingPoints,
-            borderColor: "transparent",
-            backgroundColor: "#d85a30",
-            pointRadius: 5,
-            showLine: false
-          }
+          { label: "Schlusskurs", data: closes, borderColor: "#1a1a1a", borderWidth: 1.5, pointRadius: 0, tension: 0.1 },
+          { label: "Schwungpunkte", data: swingPoints, borderColor: "transparent", backgroundColor: "#d85a30", pointRadius: 5, showLine: false }
         ]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false }
-        },
-        scales: {
-          x: { ticks: { maxTicksLimit: 8 } },
-          y: { ticks: { callback: (v) => v } }
-        }
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { ticks: { callback: (v) => v } } }
       }
     });
   }, [result]);
+
+  const tend = result ? tendency(result.analysis.confluenceScore) : null;
 
   return (
     <div className="container">
       <h1 style={{ fontSize: "22px", fontWeight: 500, marginBottom: "4px" }}>
         Elliott-Wellen & Fundamentaldaten Dashboard
       </h1>
-      <p style={{ fontSize: "14px", color: "#6b6b68", marginTop: 0, marginBottom: "1.5rem" }}>
-        Edukatives Analyse-Tool. Ticker eingeben, Kursverlauf, Fundamentaldaten und aktuelle News
-        werden automatisch geladen und von Claude eingeordnet.
+      <p style={{ fontSize: "14px", color: "#6b6b68", marginTop: 0, marginBottom: "1.25rem" }}>
+        Firmenname oder Ticker eingeben. Kursverlauf, Fundamentaldaten und die Wellen-Einordnung
+        werden automatisch geladen.
       </p>
 
-      <div className="search-row">
-        <input
-          type="text"
-          placeholder="z.B. AAPL, XPEV, BABA, PYPL"
-          value={ticker}
-          onChange={(e) => setTicker(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleAnalyze()}
-        />
-        <button onClick={handleAnalyze} disabled={loading}>
-          {loading ? "Analysiere..." : "Analysieren"}
-        </button>
+      <div style={{ position: "relative", marginBottom: "10px" }}>
+        <div className="search-row" style={{ marginBottom: 0 }}>
+          <input
+            type="text"
+            placeholder="z.B. Alibaba, Apple, PayPal oder AAPL"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setShowSuggestions(true);
+            }}
+            onFocus={() => setShowSuggestions(true)}
+            onKeyDown={(e) => e.key === "Enter" && handleManualSubmit()}
+          />
+          <button onClick={handleManualSubmit} disabled={loading}>
+            {loading ? "Analysiere..." : "Analysieren"}
+          </button>
+        </div>
+
+        {showSuggestions && suggestions.length > 0 && (
+          <div className="suggestions-box">
+            {suggestions.map((s) => (
+              <div key={s.symbol} className="suggestion-item" onClick={() => handleSelectSuggestion(s)}>
+                <span style={{ fontWeight: 500 }}>{s.symbol}</span>
+                <span style={{ color: "#6b6b68", marginLeft: "8px", fontSize: "13px" }}>
+                  {s.name} {s.exchange ? `\u00b7 ${s.exchange}` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "1.5rem" }}>
+        <span style={{ fontSize: "12.5px", color: "#8a8a86", marginRight: "4px", alignSelf: "center" }}>
+          Schnellauswahl:
+        </span>
+        {QUICK_PICKS.map((t) => (
+          <button
+            key={t}
+            onClick={() => handleQuickPick(t)}
+            disabled={loading}
+            style={{
+              padding: "4px 12px",
+              fontSize: "13px",
+              background: "#fff",
+              color: "#1a1a1a",
+              border: "1px solid #d0d0cd"
+            }}
+          >
+            {t}
+          </button>
+        ))}
       </div>
 
       {error && <div className="error-box">{error}</div>}
 
-      {result && (
+      {loading && (
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div className="spinner"></div>
+          <span style={{ fontSize: "14px", color: "#3a3a38" }}>{LOADING_STEPS[loadingStep]}</span>
+        </div>
+      )}
+
+      {result && !loading && (
         <>
           <div className="card">
             <p className="label">Unternehmen</p>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "6px" }}>
               <div>
                 <span style={{ fontSize: "18px", fontWeight: 500 }}>{result.profile.name}</span>
                 <span style={{ fontSize: "13px", color: "#6b6b68", marginLeft: "8px" }}>
@@ -139,6 +232,22 @@ export default function Home() {
             </div>
           </div>
 
+          <div
+            className="card"
+            style={{ background: tend.bg, border: "none", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}
+          >
+            <div>
+              <p style={{ fontSize: "15px", fontWeight: 600, color: tend.color, margin: 0 }}>{tend.label}</p>
+              <p style={{ fontSize: "12.5px", color: "#5a5a56", margin: "4px 0 0" }}>
+                Abgeleitet aus dem Konfluenz-Score unten &mdash; keine Kauf-, Halte- oder Verkaufsempfehlung.
+              </p>
+            </div>
+            <span style={{ fontSize: "22px", fontWeight: 600, color: tend.color }}>
+              {result.analysis.confluenceScore > 0 ? "+" : ""}
+              {result.analysis.confluenceScore}
+            </span>
+          </div>
+
           <div className="card">
             <p className="label">Kursverlauf mit erkannten Schwungpunkten</p>
             <div style={{ position: "relative", height: "260px" }}>
@@ -148,9 +257,7 @@ export default function Home() {
 
           <div className="card">
             <p className="label">Elliott-Wellen-Einordnung (Konfidenz: {result.analysis.waveConfidence})</p>
-            <p style={{ fontSize: "16px", fontWeight: 500, margin: "0 0 8px" }}>
-              {result.analysis.wavePhaseLabel}
-            </p>
+            <p style={{ fontSize: "16px", fontWeight: 500, margin: "0 0 8px" }}>{result.analysis.wavePhaseLabel}</p>
             <p style={{ fontSize: "14px", lineHeight: 1.6, color: "#3a3a38", margin: 0 }}>
               {result.analysis.waveReasoning}
             </p>
@@ -170,7 +277,7 @@ export default function Home() {
           </div>
 
           <div className="card">
-            <p className="label">Konfluenz-Score</p>
+            <p className="label">Konfluenz-Score im Detail</p>
             <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "10px" }}>
               <span style={{ fontSize: "24px", fontWeight: 500 }}>
                 {result.analysis.confluenceScore > 0 ? "+" : ""}
